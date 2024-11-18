@@ -1,0 +1,114 @@
+name: CI/CD Pipeline for Manufacturing Detection
+
+on:
+  push:
+    branches:
+      - master  # Trigger the pipeline on changes to the master branch
+
+jobs:
+  # Continuous Integration
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up Python environment and dependencies
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.8'  # Use the version that matches your project
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+  # Continuous Delivery
+  push_to_ecr:
+    runs-on: ubuntu-latest
+    needs: build  # Ensures this job only runs after the build job succeeds
+    
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up AWS CLI
+      - name: Set up AWS CLI
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region ap-south-1  # Replace with your region
+
+      # Step 3: Log in to AWS ECR
+      - name: Log in to AWS ECR
+        run: |
+          aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 886436948023.dkr.ecr.ap-south-1.amazonaws.com
+
+      # Step 4: Build and push Docker image to AWS ECR
+      - name: Build and Push Docker image
+        run: |
+          docker build -t traffic-detection .
+          docker tag traffic-detection:latest 886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest
+          docker push 886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest
+
+  # Continuous Deployment
+  deploy_to_ec2:
+    runs-on: ubuntu-latest
+    needs: push_to_ecr  # This job will only run after the image is pushed to ECR
+    
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up SSH agent to use the private key for EC2 access
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.EC2_PRIVATE_KEY }}  # Replace with your private key stored in GitHub Secrets
+
+      # Step 3: Configure AWS CLI
+      - name: Configure AWS CLI
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region ap-south-1  # Replace with your region
+
+      # Step 4: Deploy to EC2 instance
+      - name: Deploy to EC2 instance
+        run: |
+          # Connect to EC2 and perform deployment
+          ssh -o StrictHostKeyChecking=no ubuntu@13.200.207.243 << EOF
+            # Stop and remove any running container on port 8080
+            CONTAINER_ID=$(docker ps -q -f "ancestor=886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest")
+            if [ ! -z "$CONTAINER_ID" ]; then
+              docker stop $CONTAINER_ID
+              docker rm $CONTAINER_ID
+            fi
+
+            # Optionally remove old images if needed
+            IMAGE_ID=$(docker images -q 886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest)
+            if [ ! -z "$IMAGE_ID" ]; then
+              docker rmi $IMAGE_ID
+            fi
+
+            # Login to AWS ECR
+            aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 886436948023.dkr.ecr.ap-south-1.amazonaws.com
+            
+            # Pull the Docker image from ECR
+            docker pull 886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest
+
+            # Run the Docker container on EC2
+            docker run -d -p 8080:8080 886436948023.dkr.ecr.ap-south-1.amazonaws.com/traffic-detection:latest
+          EOF
+
+      # Optional: Check the running container logs (for debugging purposes)
+      - name: Check Docker container logs
+        run: |
+          ssh -o StrictHostKeyChecking=no ubuntu@13.200.207.243 << EOF
+            docker ps
+          EOF
